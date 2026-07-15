@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2D Path Tracer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            display: flex;
+            gap: 30px;
+            flex-wrap: wrap;
+            justify-content: center;
+            align-items: flex-start;
+            max-width: 1200px;
+        }
+
+        .canvas-wrapper {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            align-items: center;
+        }
+
+        canvas {
+            border: 3px solid #00d4ff;
+            background: #0a0a0a;
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.5);
+            display: block;
+            image-rendering: pixelated;
+        }
+
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 20px;
+            border-radius: 10px;
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            min-width: 250px;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        label {
+            color: #00d4ff;
+            font-weight: 600;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            height: 6px;
+            background: rgba(0, 212, 255, 0.2);
+            border-radius: 3px;
+            outline: none;
+            -webkit-appearance: none;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            background: #00d4ff;
+            border-radius: 50%;
+            cursor: pointer;
+            box-shadow: 0 0 10px rgba(0, 212, 255, 0.7);
+        }
+
+        input[type="range"]::-moz-range-thumb {
+            width: 16px;
+            height: 16px;
+            background: #00d4ff;
+            border-radius: 50%;
+            cursor: pointer;
+            border: none;
+            box-shadow: 0 0 10px rgba(0, 212, 255, 0.7);
+        }
+
+        .value-display {
+            color: #00ff88;
+            font-size: 13px;
+            font-family: monospace;
+            text-align: center;
+        }
+
+        button {
+            background: linear-gradient(135deg, #00d4ff 0%, #0099cc 100%);
+            border: none;
+            color: #0a0a0a;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            transition: all 0.3s ease;
+            box-shadow: 0 0 15px rgba(0, 212, 255, 0.4);
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 0 25px rgba(0, 212, 255, 0.7);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        .stats {
+            background: rgba(0, 255, 136, 0.1);
+            padding: 12px;
+            border-radius: 5px;
+            border: 1px solid rgba(0, 255, 136, 0.3);
+            color: #00ff88;
+            font-size: 12px;
+            font-family: monospace;
+            line-height: 1.6;
+        }
+
+        .title {
+            color: #00d4ff;
+            font-size: 24px;
+            font-weight: 700;
+            letter-spacing: 2px;
+            text-align: center;
+            width: 100%;
+            text-shadow: 0 0 20px rgba(0, 212, 255, 0.5);
+            margin-bottom: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                flex-direction: column;
+                gap: 20px;
+            }
+
+            .controls {
+                min-width: auto;
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="title">2D Path Tracer</div>
+        <div class="canvas-wrapper">
+            <canvas id="canvas" width="600" height="600"></canvas>
+            <div class="stats" id="stats">
+                Resolution: 600x600<br>
+                Samples: 0<br>
+                FPS: 0
+            </div>
+        </div>
+        <div class="controls">
+            <div class="control-group">
+                <label for="samplesSlider">Samples Per Pixel</label>
+                <input type="range" id="samplesSlider" min="1" max="256" value="32">
+                <div class="value-display" id="samplesValue">32</div>
+            </div>
+
+            <div class="control-group">
+                <label for="bouncesSlider">Max Bounces</label>
+                <input type="range" id="bouncesSlider" min="1" max="20" value="8">
+                <div class="value-display" id="bouncesValue">8</div>
+            </div>
+
+            <div class="control-group">
+                <label for="blockSizeSlider">Block Size (px)</label>
+                <input type="range" id="blockSizeSlider" min="1" max="10" value="4">
+                <div class="value-display" id="blockSizeValue">4</div>
+            </div>
+
+            <div class="control-group">
+                <label for="exposureSlider">Exposure</label>
+                <input type="range" id="exposureSlider" min="0.1" max="3" step="0.1" value="1">
+                <div class="value-display" id="exposureValue">1.0</div>
+            </div>
+
+            <button id="resetButton">Reset Scene</button>
+            <button id="clearButton">Clear Canvas</button>
+
+            <div class="stats" id="renderStats">
+                Frame time: 0ms<br>
+                Blocks rendered: 0<br>
+                Active samples: 0
+            </div>
+        </div>
+    </div>
+
+    <script src="pathtracer.js"></script>
+</body>
+</html>
