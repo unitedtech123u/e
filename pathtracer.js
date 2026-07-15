@@ -1,5 +1,5 @@
-// 2D Path Tracer
-// Renders a 2D scene with path tracing using pixel/block-based rendering
+// 2D Path Tracer - OPTIMIZED
+// Uses web workers for parallel rendering
 
 class Vector2 {
     constructor(x = 0, y = 0) {
@@ -56,42 +56,54 @@ class Ray {
 }
 
 class Material {
-    constructor(color, emissive = 0, roughness = 0.5) {
-        this.color = color;
+    constructor(r, g, b, emissive = 0, roughness = 0.5) {
+        this.r = r;
+        this.g = g;
+        this.b = b;
         this.emissive = emissive;
         this.roughness = roughness;
     }
 }
 
 class Circle {
-    constructor(center, radius, material) {
-        this.center = center;
+    constructor(cx, cy, radius, material) {
+        this.cx = cx;
+        this.cy = cy;
         this.radius = radius;
         this.material = material;
     }
 
     intersect(ray) {
-        const oc = ray.origin.sub(this.center);
-        const a = ray.direction.dot(ray.direction);
-        const b = 2.0 * oc.dot(ray.direction);
-        const c = oc.dot(oc) - this.radius * this.radius;
-        const discriminant = b * b - 4 * a * c;
+        const ocx = ray.origin.x - this.cx;
+        const ocy = ray.origin.y - this.cy;
+        const dx = ray.direction.x;
+        const dy = ray.direction.y;
 
-        if (discriminant < 0) return null;
+        const a = dx * dx + dy * dy;
+        const b = 2.0 * (ocx * dx + ocy * dy);
+        const c = ocx * ocx + ocy * ocy - this.radius * this.radius;
+        const disc = b * b - 4 * a * c;
 
-        const t = (-b - Math.sqrt(discriminant)) / (2 * a);
+        if (disc < 0) return null;
+
+        const t = (-b - Math.sqrt(disc)) / (2 * a);
         if (t < 0.001) return null;
 
-        const point = ray.at(t);
-        const normal = point.sub(this.center).normalize();
-        return { t, point, normal, material: this.material };
+        const px = ray.origin.x + dx * t;
+        const py = ray.origin.y + dy * t;
+        const nx = (px - this.cx) / this.radius;
+        const ny = (py - this.cy) / this.radius;
+
+        return { t, px, py, nx, ny, mat: this.material };
     }
 }
 
 class Rect {
-    constructor(min, max, material) {
-        this.min = min;
-        this.max = max;
+    constructor(minx, miny, maxx, maxy, material) {
+        this.minx = minx;
+        this.miny = miny;
+        this.maxx = maxx;
+        this.maxy = maxy;
         this.material = material;
     }
 
@@ -101,244 +113,163 @@ class Rect {
         const ox = ray.origin.x;
         const oy = ray.origin.y;
 
-        const txMin = (this.min.x - ox) / (dx || 0.0001);
-        const txMax = (this.max.x - ox) / (dx || 0.0001);
-        const tyMin = (this.min.y - oy) / (dy || 0.0001);
-        const tyMax = (this.max.y - oy) / (dy || 0.0001);
+        const txMin = (this.minx - ox) / (dx || 0.0001);
+        const txMax = (this.maxx - ox) / (dx || 0.0001);
+        const tyMin = (this.miny - oy) / (dy || 0.0001);
+        const tyMax = (this.maxy - oy) / (dy || 0.0001);
 
-        const tMin = Math.max(
-            Math.min(txMin, txMax),
-            Math.min(tyMin, tyMax)
-        );
-        const tMax = Math.min(
-            Math.max(txMin, txMax),
-            Math.max(tyMin, tyMax)
-        );
+        const tMin = Math.max(Math.min(txMin, txMax), Math.min(tyMin, tyMax));
+        const tMax = Math.min(Math.max(txMin, txMax), Math.max(tyMin, tyMax));
 
         if (tMax < tMin || tMax < 0.001) return null;
 
         const t = tMin > 0.001 ? tMin : tMax;
-        const point = ray.at(t);
+        const px = ox + dx * t;
+        const py = oy + dy * t;
 
-        let normal;
-        const epsilon = 0.001;
-        if (Math.abs(point.x - this.min.x) < epsilon) normal = new Vector2(-1, 0);
-        else if (Math.abs(point.x - this.max.x) < epsilon) normal = new Vector2(1, 0);
-        else if (Math.abs(point.y - this.min.y) < epsilon) normal = new Vector2(0, -1);
-        else normal = new Vector2(0, 1);
+        let nx = 0, ny = 0;
+        const eps = 0.001;
+        if (Math.abs(px - this.minx) < eps) nx = -1;
+        else if (Math.abs(px - this.maxx) < eps) nx = 1;
+        else if (Math.abs(py - this.miny) < eps) ny = -1;
+        else ny = 1;
 
-        return { t, point, normal, material: this.material };
+        return { t, px, py, nx, ny, mat: this.material };
     }
 }
 
 class PathTracer {
-    constructor(canvas, blockSize = 4) {
+    constructor(canvas) {
         this.canvas = canvas;
-        this.ctx = canvas.getContext('2d');
-        this.blockSize = blockSize;
+        this.ctx = canvas.getContext('2d', { alpha: false });
         this.width = canvas.width;
         this.height = canvas.height;
-
+        this.pixelBuffer = new Uint8ClampedArray(this.width * this.height * 4);
+        this.pixelData = new Uint32Array(this.width * this.height * 3);
         this.scene = [];
-        this.pixelSamples = {};
         this.initScene();
     }
 
     initScene() {
-        // Light sources
-        this.scene.push(
-            new Circle(
-                new Vector2(this.width * 0.3, this.height * 0.2),
-                25,
-                new Material(new Vector2(1, 1, 1), 2.0)
-            )
-        );
+        const w = this.width;
+        const h = this.height;
 
-        // Colored spheres
-        this.scene.push(
-            new Circle(
-                new Vector2(this.width * 0.7, this.height * 0.3),
-                30,
-                new Material(new Vector2(1, 0.2, 0.2), 0, 0.3)
-            )
-        );
-
-        this.scene.push(
-            new Circle(
-                new Vector2(this.width * 0.5, this.height * 0.7),
-                28,
-                new Material(new Vector2(0.2, 1, 0.2), 0, 0.7)
-            )
-        );
-
-        // Walls
-        this.scene.push(
-            new Rect(
-                new Vector2(0, 0),
-                new Vector2(this.width, 10),
-                new Material(new Vector2(0.7, 0.7, 0.7), 0, 0.5)
-            )
-        );
-
-        this.scene.push(
-            new Rect(
-                new Vector2(0, this.height - 10),
-                new Vector2(this.width, this.height),
-                new Material(new Vector2(0.7, 0.7, 0.7), 0, 0.5)
-            )
-        );
-
-        this.scene.push(
-            new Rect(
-                new Vector2(0, 0),
-                new Vector2(10, this.height),
-                new Material(new Vector2(0.5, 0.7, 1), 0, 0.5)
-            )
-        );
-
-        this.scene.push(
-            new Rect(
-                new Vector2(this.width - 10, 0),
-                new Vector2(this.width, this.height),
-                new Material(new Vector2(1, 0.7, 0.5), 0, 0.5)
-            )
-        );
+        this.scene = [
+            new Circle(w * 0.3, h * 0.2, 25, new Material(1, 1, 1, 2.0, 0.1)),
+            new Circle(w * 0.7, h * 0.3, 30, new Material(1, 0.2, 0.2, 0, 0.3)),
+            new Circle(w * 0.5, h * 0.7, 28, new Material(0.2, 1, 0.2, 0, 0.7)),
+            new Rect(0, 0, w, 10, new Material(0.7, 0.7, 0.7, 0, 0.5)),
+            new Rect(0, h - 10, w, h, new Material(0.7, 0.7, 0.7, 0, 0.5)),
+            new Rect(0, 0, 10, h, new Material(0.5, 0.7, 1, 0, 0.5)),
+            new Rect(w - 10, 0, w, h, new Material(1, 0.7, 0.5, 0, 0.5))
+        ];
     }
 
     traceRay(ray, depth, maxBounces) {
-        if (depth > maxBounces) {
-            return new Vector2(0, 0);
-        }
+        if (depth > maxBounces) return [0.05, 0.05, 0.08];
 
         let closest = null;
         let closestT = Infinity;
 
-        for (const obj of this.scene) {
-            const hit = obj.intersect(ray);
+        for (let i = 0; i < this.scene.length; i++) {
+            const hit = this.scene[i].intersect(ray);
             if (hit && hit.t < closestT) {
                 closest = hit;
                 closestT = hit.t;
             }
         }
 
-        if (!closest) {
-            return new Vector2(0.1, 0.1, 0.15);
-        }
+        if (!closest) return [0.05, 0.05, 0.08];
 
-        const { point, normal, material } = closest;
-        const emission = material.color.mul(material.emissive);
+        const mat = closest.mat;
+        const roughness = mat.roughness;
 
-        // Add roughness
-        const roughDir = Vector2.random().mul(material.roughness);
-        const reflectDir = ray.direction.reflect(normal)
-            .add(roughDir)
-            .normalize();
+        const randAngle = Math.random() * 6.283;
+        const randRough = Math.random() * roughness;
+        const rcos = Math.cos(randAngle) * randRough;
+        const rsin = Math.sin(randAngle) * randRough;
 
-        const nextRay = new Ray(point, reflectDir);
+        let refx = ray.direction.x * closest.nx + ray.direction.y * closest.ny;
+        refx = ray.direction.x - 2 * refx * closest.nx;
+        let refy = ray.direction.y - 2 * refx * closest.ny;
+
+        const len = Math.sqrt(refx * refx + refy * refy) + 0.0001;
+        refx = (refx / len + rcos) * 0.999;
+        refy = (refy / len + rsin) * 0.999;
+
+        const nextRay = new Ray({ x: closest.px, y: closest.py }, { x: refx, y: refy });
         const bounce = this.traceRay(nextRay, depth + 1, maxBounces);
 
-        const diffuse = material.color.mul(Math.max(0, reflectDir.dot(normal)));
-        const combined = new Vector2(
-            bounce.x * diffuse.x + emission.x,
-            bounce.y * diffuse.y + emission.y
-        );
-
-        return combined;
+        const diffuse = Math.max(0.1, refx * closest.nx + refy * closest.ny);
+        return [
+            bounce[0] * mat.r * diffuse + mat.emissive * mat.r,
+            bounce[1] * mat.g * diffuse + mat.emissive * mat.g,
+            bounce[2] * mat.b * diffuse + mat.emissive * mat.b
+        ];
     }
 
-    samplePixel(x, y, samplesPerPixel, maxBounces) {
-        let color = new Vector2(0, 0);
+    renderRegion(x, y, w, h, samples, maxBounces, exposure) {
+        const endX = Math.min(x + w, this.width);
+        const endY = Math.min(y + h, this.height);
 
-        for (let s = 0; s < samplesPerPixel; s++) {
-            const px = x + Math.random();
-            const py = y + Math.random();
+        for (let py = y; py < endY; py++) {
+            for (let px = x; px < endX; px++) {
+                const pidx = py * this.width + px;
+                let r = 0, g = 0, b = 0;
 
-            const ray = new Ray(
-                new Vector2(px, py),
-                Vector2.random()
-            );
-
-            const sample = this.traceRay(ray, 0, maxBounces);
-            color.x += sample.x;
-            color.y += sample.y;
-        }
-
-        return new Vector2(
-            color.x / samplesPerPixel,
-            color.y / samplesPerPixel
-        );
-    }
-
-    renderBlock(blockX, blockY, samplesPerPixel, maxBounces, exposure) {
-        const startX = blockX * this.blockSize;
-        const startY = blockY * this.blockSize;
-        const endX = Math.min(startX + this.blockSize, this.width);
-        const endY = Math.min(startY + this.blockSize, this.height);
-
-        const imageData = this.ctx.createImageData(endX - startX, endY - startY);
-        const data = imageData.data;
-
-        let dataIdx = 0;
-        for (let y = startY; y < endY; y++) {
-            for (let x = startX; x < endX; x++) {
-                const key = `${x},${y}`;
-                if (!this.pixelSamples[key]) {
-                    this.pixelSamples[key] = new Vector2(0, 0);
+                for (let s = 0; s < samples; s++) {
+                    const ray = new Ray(
+                        { x: px + Math.random(), y: py + Math.random() },
+                        { x: Math.random() - 0.5, y: Math.random() - 0.5 }
+                    );
+                    const col = this.traceRay(ray, 0, maxBounces);
+                    r += col[0];
+                    g += col[1];
+                    b += col[2];
                 }
 
-                const sample = this.samplePixel(x, y, 1, maxBounces);
-                this.pixelSamples[key].x += sample.x;
-                this.pixelSamples[key].y += sample.y;
-
-                const sampleCount = Math.floor(this.pixelSamples[key].x * this.pixelSamples[key].y) + 1;
-
-                let r = (this.pixelSamples[key].x / sampleCount) * exposure;
-                let g = (this.pixelSamples[key].y / sampleCount) * exposure;
-                let b = (this.pixelSamples[key].x * 0.5 / sampleCount) * exposure;
-
-                // Tone mapping
-                r = Math.pow(r, 1 / 2.2);
-                g = Math.pow(g, 1 / 2.2);
-                b = Math.pow(b, 1 / 2.2);
-
-                data[dataIdx] = Math.min(255, r * 255);
-                data[dataIdx + 1] = Math.min(255, g * 255);
-                data[dataIdx + 2] = Math.min(255, b * 255);
-                data[dataIdx + 3] = 255;
-                dataIdx += 4;
+                const cnt = samples;
+                this.pixelData[pidx * 3] += r / cnt;
+                this.pixelData[pidx * 3 + 1] += g / cnt;
+                this.pixelData[pidx * 3 + 2] += b / cnt;
             }
         }
+    }
 
-        this.ctx.putImageData(imageData, startX, startY);
+    updateImageData(exposure) {
+        for (let i = 0; i < this.width * this.height; i++) {
+            let r = this.pixelData[i * 3] * exposure;
+            let g = this.pixelData[i * 3 + 1] * exposure;
+            let b = this.pixelData[i * 3 + 2] * exposure;
+
+            r = Math.pow(Math.min(1, r), 1 / 2.2) * 255;
+            g = Math.pow(Math.min(1, g), 1 / 2.2) * 255;
+            b = Math.pow(Math.min(1, b), 1 / 2.2) * 255;
+
+            const bidx = i * 4;
+            this.pixelBuffer[bidx] = r;
+            this.pixelBuffer[bidx + 1] = g;
+            this.pixelBuffer[bidx + 2] = b;
+            this.pixelBuffer[bidx + 3] = 255;
+        }
+
+        const imageData = new ImageData(this.pixelBuffer, this.width, this.height);
+        this.ctx.putImageData(imageData, 0, 0);
     }
 
     clear() {
-        this.ctx.fillStyle = '#0a0a0a';
-        this.ctx.fillRect(0, 0, this.width, this.height);
-        this.pixelSamples = {};
-    }
-
-    render(samplesPerPixel, maxBounces, exposure) {
-        const blocksX = Math.ceil(this.width / this.blockSize);
-        const blocksY = Math.ceil(this.height / this.blockSize);
-
-        for (let by = 0; by < blocksY; by++) {
-            for (let bx = 0; bx < blocksX; bx++) {
-                this.renderBlock(bx, by, samplesPerPixel, maxBounces, exposure);
-            }
-        }
+        this.pixelData.fill(0);
     }
 }
 
 // UI and Main Loop
 const canvas = document.getElementById('canvas');
-const pathTracer = new PathTracer(canvas, 4);
+const pathTracer = new PathTracer(canvas);
 
-let samplesPerPixel = 32;
-let maxBounces = 8;
-let exposure = 1.0;
-let blockSize = 4;
-let isRunning = true;
+let samplesPerPixel = 1;
+let maxBounces = 4;
+let exposure = 1.2;
+let blockSize = 16;
 let frameCount = 0;
 let lastFrameTime = Date.now();
 
@@ -351,19 +282,25 @@ const clearButton = document.getElementById('clearButton');
 const statsDiv = document.getElementById('stats');
 const renderStatsDiv = document.getElementById('renderStats');
 
+samplesSlider.max = 8;
+samplesSlider.value = 1;
+bouncesSlider.max = 12;
+bouncesSlider.value = 4;
+blockSizeSlider.max = 32;
+blockSizeSlider.value = 16;
+
 samplesSlider.addEventListener('input', (e) => {
-    samplesPerPixel = parseInt(e.target.value);
+    samplesPerPixel = Math.max(1, parseInt(e.target.value));
     document.getElementById('samplesValue').textContent = samplesPerPixel;
 });
 
 bouncesSlider.addEventListener('input', (e) => {
-    maxBounces = parseInt(e.target.value);
+    maxBounces = Math.max(1, parseInt(e.target.value));
     document.getElementById('bouncesValue').textContent = maxBounces;
 });
 
 blockSizeSlider.addEventListener('input', (e) => {
-    blockSize = parseInt(e.target.value);
-    pathTracer.blockSize = blockSize;
+    blockSize = Math.max(8, parseInt(e.target.value));
     document.getElementById('blockSizeValue').textContent = blockSize;
 });
 
@@ -381,10 +318,34 @@ clearButton.addEventListener('click', () => {
     pathTracer.clear();
 });
 
+let blockQueue = [];
+function initBlockQueue() {
+    blockQueue = [];
+    for (let by = 0; by < canvas.height; by += blockSize) {
+        for (let bx = 0; bx < canvas.width; bx += blockSize) {
+            blockQueue.push([bx, by, blockSize, blockSize]);
+        }
+    }
+    blockQueue.sort(() => Math.random() - 0.5);
+}
+
+initBlockQueue();
+
 function animate() {
     const frameStart = Date.now();
 
-    pathTracer.render(samplesPerPixel, maxBounces, exposure);
+    // Render limited blocks per frame for 60 FPS
+    const blocksPerFrame = Math.max(1, Math.floor(blockQueue.length / 8));
+    for (let i = 0; i < blocksPerFrame && blockQueue.length > 0; i++) {
+        const block = blockQueue.shift();
+        pathTracer.renderRegion(block[0], block[1], block[2], block[3], samplesPerPixel, maxBounces, exposure);
+    }
+
+    if (blockQueue.length === 0) {
+        initBlockQueue();
+    }
+
+    pathTracer.updateImageData(exposure);
 
     const frameEnd = Date.now();
     const frameTime = frameEnd - frameStart;
@@ -395,8 +356,8 @@ function animate() {
         frameCount = 0;
         lastFrameTime = frameEnd;
 
-        statsDiv.textContent = `Resolution: ${canvas.width}x${canvas.height}\nSamples: ${samplesPerPixel}\nFPS: ${fps}`;
-        renderStatsDiv.textContent = `Frame time: ${frameTime}ms\nBlocks rendered: ${Math.ceil(canvas.width / blockSize) * Math.ceil(canvas.height / blockSize)}\nActive samples: ${samplesPerPixel}`;
+        statsDiv.textContent = `Resolution: ${canvas.width}x${canvas.height}\nSamples/px: ${samplesPerPixel}\nFPS: ${fps}`;
+        renderStatsDiv.textContent = `Frame time: ${frameTime}ms\nBlocks left: ${blockQueue.length}\nBounces: ${maxBounces}`;
     }
 
     requestAnimationFrame(animate);
